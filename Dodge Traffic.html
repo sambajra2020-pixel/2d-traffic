@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dodge Traffic</title>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&display=swap" rel="stylesheet">
+<style>
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html, body { height: 100%; margin: 0; background: #0f1216; }
+  body { display: grid; place-items: center; overflow: hidden; }
+  canvas { display: block; height: 100%; max-width: 100%; aspect-ratio: 3 / 5; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="360" height="600"></canvas>
+<script>
+// ---------- SETUP ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = 360, H = 600;           // logical game size (CSS scales it)
+const ROAD_L = 30, LANE = 75, LANES = 4;
+const laneX = i => ROAD_L + LANE * i + LANE / 2;   // centre x of a lane
+// Lanes 0-1 are oncoming traffic, lanes 2-3 go your way. One speed per lane
+// so cars in the same lane never overlap.
+const LANE_V = [120, 80, 140, 100];
+const COLORS = ['#e8e1cc', '#7fb0a3', '#c9a227', '#8f7fb8', '#d9d9d9', '#5f8f4e'];
+
+let state = 'ready';              // 'ready' | 'play' | 'over'
+let car, traffic, scroll = 0, dist, speed, sinceSpawn, shake = 0, crashAt = 0, best = 0;
+try { best = +localStorage.getItem('dodge-best') || 0; } catch (e) {}
+
+function reset() {
+  car = { lane: 2, x: laneX(2), y: H - 120, w: 36, h: 64 };
+  traffic = []; dist = 0; speed = 260; sinceSpawn = 0; shake = 0;
+}
+
+// ---------- INPUT ----------
+function move(d) {
+  if (state !== 'play') return;
+  car.lane = Math.max(0, Math.min(LANES - 1, car.lane + d));
+}
+function tryStart() {
+  if (state === 'ready' || (state === 'over' && performance.now() - crashAt > 500)) { reset(); state = 'play'; }
+}
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'arrowleft' || k === 'a') { move(-1); e.preventDefault(); }
+  else if (k === 'arrowright' || k === 'd') { move(1); e.preventDefault(); }
+  else if (k === ' ' || k === 'enter') { tryStart(); e.preventDefault(); }
+});
+cv.addEventListener('pointerdown', e => {      // tap left/right half on phones
+  if (state !== 'play') { tryStart(); return; }
+  const r = cv.getBoundingClientRect();
+  move(e.clientX - r.left < r.width / 2 ? -1 : 1);
+});
+
+// ---------- GAME LOGIC ----------
+function spawn() {
+  const n = Math.random() < 0.3 ? 2 : 1;      // never block more than 2 lanes
+  const lanes = [0, 1, 2, 3].sort(() => Math.random() - 0.5).slice(0, n);
+  for (const l of lanes) {
+    const truck = Math.random() < 0.15;
+    traffic.push({
+      lane: l, x: laneX(l), y: -120, w: truck ? 40 : 36, h: truck ? 100 : 64,
+      color: COLORS[Math.floor(Math.random() * COLORS.length)], truck
+    });
+  }
+}
+
+function crash() {
+  state = 'over'; crashAt = performance.now(); shake = 0.4;
+  if (dist > best) {
+    best = Math.floor(dist);
+    try { localStorage.setItem('dodge-best', best); } catch (e) {}
+  }
+}
+
+function update(dt) {
+  speed = Math.min(640, 260 + dist * 0.3);     // gets faster the further you go
+  scroll = (scroll + speed * dt) % 60;
+  dist += speed * dt / 20;
+  sinceSpawn += speed * dt;
+  if (sinceSpawn > Math.max(170, 300 - dist * 0.1)) { sinceSpawn = 0; spawn(); }
+
+  car.x += (laneX(car.lane) - car.x) * Math.min(1, dt * 14);   // smooth lane change
+
+  for (const t of traffic) {
+    // oncoming cars close in faster, same-direction cars slower
+    t.y += (t.lane < 2 ? speed + LANE_V[t.lane] : speed - LANE_V[t.lane]) * dt;
+  }
+  traffic = traffic.filter(t => t.y < H + 150);
+
+  for (const t of traffic) {                   // box collision, slightly forgiving
+    if (Math.abs(t.x - car.x) < (t.w + car.w) / 2 - 4 &&
+        Math.abs(t.y - car.y) < (t.h + car.h) / 2 - 4) { crash(); break; }
+  }
+}
+
+// ---------- DRAWING ----------
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+
+function drawCar(x, y, w, h, color, facingUp, truck) {
+  ctx.save(); ctx.translate(x, y);
+  if (!facingUp) ctx.scale(1, -1);
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; rr(-w / 2 + 3, -h / 2 + 4, w, h, 8); ctx.fill();   // shadow
+  ctx.fillStyle = color; rr(-w / 2, -h / 2, w, h, 8); ctx.fill();                       // body
+  ctx.fillStyle = '#14181d';
+  if (truck) {
+    rr(-w / 2 + 4, -h / 2 + 6, w - 8, 14, 4); ctx.fill();                               // cab window
+    ctx.fillStyle = 'rgba(0,0,0,.18)'; ctx.fillRect(-w / 2 + 2, -h / 2 + 26, w - 4, h - 30); // cargo box
+  } else {
+    rr(-w / 2 + 5, -h / 2 + 14, w - 10, 15, 4); ctx.fill();                             // windshield
+    rr(-w / 2 + 6, h / 2 - 20, w - 12, 9, 3); ctx.fill();                               // rear window
+  }
+  ctx.fillStyle = '#fff3b0'; ctx.fillRect(-w / 2 + 3, -h / 2, 7, 4); ctx.fillRect(w / 2 - 10, -h / 2, 7, 4);   // headlights
+  ctx.fillStyle = '#e0412f'; ctx.fillRect(-w / 2 + 3, h / 2 - 3, 8, 3); ctx.fillRect(w / 2 - 11, h / 2 - 3, 8, 3); // tail lights
+  ctx.restore();
+}
+
+function draw() {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - .5) * 25 * shake, (Math.random() - .5) * 25 * shake);
+
+  ctx.fillStyle = '#183530'; ctx.fillRect(-20, -20, W + 40, H + 40);                   // verge
+  ctx.fillStyle = '#2f333a'; ctx.fillRect(ROAD_L, 0, LANE * LANES, H);                 // asphalt
+  ctx.fillStyle = '#2a4f46';
+  for (let y = -60 + scroll; y < H; y += 60) { ctx.fillRect(10, y, 6, 18); ctx.fillRect(W - 16, y, 6, 18); } // posts
+  ctx.fillStyle = '#e8e1cc'; ctx.fillRect(ROAD_L + 2, 0, 3, H); ctx.fillRect(W - ROAD_L - 5, 0, 3, H);      // edges
+  ctx.fillStyle = '#ffb400'; ctx.fillRect(W / 2 - 4, 0, 2.5, H); ctx.fillRect(W / 2 + 1.5, 0, 2.5, H);      // centre line
+  ctx.fillStyle = 'rgba(232,225,204,.6)';
+  for (let y = -60 + scroll; y < H; y += 60) { ctx.fillRect(ROAD_L + LANE - 1.5, y, 3, 28); ctx.fillRect(ROAD_L + LANE * 3 - 1.5, y, 3, 28); }
+
+  for (const t of traffic) drawCar(t.x, t.y, t.w, t.h, t.color, t.lane >= 2, t.truck);
+  drawCar(car.x, car.y, car.w, car.h, '#2f8cff', true, false);
+  ctx.restore();
+
+  // HUD
+  ctx.fillStyle = '#f3ecd8'; ctx.font = '20px Bungee, Impact, sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(Math.floor(dist) + ' m', 14, 32);
+  ctx.font = '13px Bungee, Impact, sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText('best ' + Math.floor(best) + ' m', W - 14, 30);
+
+  if (state !== 'play') {
+    ctx.fillStyle = 'rgba(15,18,22,.78)'; ctx.fillRect(30, 200, W - 60, 190);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#ffb400';
+    ctx.font = '30px Bungee, Impact, sans-serif';
+    ctx.fillText(state === 'ready' ? 'Dodge Traffic' : 'Crashed', W / 2, 252);
+    ctx.fillStyle = '#f3ecd8'; ctx.font = '16px Bungee, Impact, sans-serif';
+    if (state === 'over') ctx.fillText(Math.floor(dist) + ' m', W / 2, 288);
+    ctx.font = '12px Bungee, Impact, sans-serif';
+    ctx.fillText('Left / Right or A / D to switch lanes', W / 2, 322);
+    ctx.fillText('Phone: tap left or right side', W / 2, 342);
+    ctx.fillStyle = '#ffb400';
+    ctx.fillText(state === 'ready' ? 'Tap or press Space to start' : 'Tap or press Space to retry', W / 2, 372);
+  }
+}
+
+// ---------- MAIN LOOP ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (state === 'play') update(dt);
+  else if (state === 'ready') scroll = (scroll + 120 * dt) % 60;
+  shake = Math.max(0, shake - dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
